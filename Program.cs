@@ -1,41 +1,53 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 
-namespace ChatClient
+namespace ChatServer
 {
     class Program
     {
-        static void Main(string[] args)
+        static async Task Main(string[] args)
         {
-            var client = new ChatClient();
-            client.Start().Wait();
+            var server = new ChatServer();
+            await server.Start();
         }
     }
 
-    public class ChatClient
+    public class ChatServer
     {
-        private TcpClient tcpClient;
-        private NetworkStream stream;
-        private string userName;
-        private bool isConnected = false;
-        private Thread receiveThread;
+        private TcpListener tcpListener;
+        private List<TcpClient> clients = new List<TcpClient>();
+        private Dictionary<TcpClient, string> clientNames = new Dictionary<TcpClient, string>();
+        private Dictionary<string, int> clientIPs = new Dictionary<string, int>();
+        private bool isRunning = true;
 
+        /// <summary>
+        /// Проверяет, является ли строка корректным IPv4 адресом
+        /// </summary>
         private bool IsValidIPv4(string ip)
         {
             if (!IPAddress.TryParse(ip, out IPAddress address))
                 return false;
+
+            // Проверяем, что это IPv4 (не IPv6)
             return address.AddressFamily == AddressFamily.InterNetwork;
         }
 
+        /// <summary>
+        /// Проверяет, является ли порт корректным числом и в диапазоне 1-65535
+        /// </summary>
         private bool IsValidPort(int port)
         {
             return port >= 1 && port <= 65535;
         }
 
+        /// <summary>
+        /// Проверяет, является ли строка корректным числом
+        /// </summary>
         private bool IsNumericString(string str)
         {
             return int.TryParse(str, out _);
@@ -43,319 +55,291 @@ namespace ChatClient
 
         public async Task Start()
         {
-            Console.WriteLine("=== TCP ЧАТ КЛИЕНТ ===");
+            Console.WriteLine("=== TCP ЧАТ СЕРВЕР ===");
 
-            // === ВВОД ИМЕНИ ===
-            while (true)
-            {
-                Console.Write("Введите ваше имя (не пустое, не более 20 символов): ");
-                userName = Console.ReadLine();
-
-                if (string.IsNullOrWhiteSpace(userName))
-                {
-                    Console.WriteLine("Ошибка: Имя не может быть пустым!");
-                    continue;
-                }
-
-                if (userName.Length > 20)
-                {
-                    Console.WriteLine("Ошибка: Имя не может быть длиннее 20 символов!");
-                    continue;
-                }
-
-                break;
-            }
-
-            // === ВВОД IP СЕРВЕРА ===
+            // === ВВОД IP АДРЕСА СЕРВЕРА С ПРОВЕРКОЙ ===
             string serverIp;
+            IPAddress ipAddress;
+
             while (true)
             {
-                Console.Write("Введите IP адрес сервера (например, 127.0.0.x): ");
+                Console.Write("Введите IP адрес сервера (например, 127.0.0.1): ");
                 serverIp = Console.ReadLine();
 
+                // Проверка: IP не должен быть пустым
                 if (string.IsNullOrWhiteSpace(serverIp))
                 {
-                    Console.WriteLine("Ошибка: IP адрес не может быть пустым!");
+                    Console.WriteLine("Ошибка: IP адрес не может быть пустым! Попробуйте снова.");
                     continue;
                 }
 
+                // Проверка: корректный ли IP адрес
                 if (!IsValidIPv4(serverIp))
                 {
-                    Console.WriteLine($"Ошибка: '{serverIp}' - не корректный IPv4 адрес!");
+                    Console.WriteLine($"Ошибка: '{serverIp}' - это не корректный IPv4 адрес! Попробуйте снова.");
+                    Console.WriteLine("Примеры: 127.0.0.1, 192.168.1.100, 10.0.0.1");
                     continue;
                 }
 
+                ipAddress = IPAddress.Parse(serverIp);
                 break;
             }
 
-            // === ВВОД ПОРТА СЕРВЕРА ===
+            // === ВВОД TCP ПОРТА С ПРОВЕРКАМИ ===
             int tcpPort;
+
             while (true)
             {
-                Console.Write("Введите TCP порт сервера (1-65535): ");
+                Console.Write("Введите TCP порт для чата (число от 1 до 65535): ");
                 string portInput = Console.ReadLine();
 
+                // Проверка: порт не должен быть пустым
                 if (string.IsNullOrWhiteSpace(portInput))
                 {
-                    Console.WriteLine("Ошибка: Порт не может быть пустым!");
+                    Console.WriteLine("Ошибка: Порт не может быть пустым! Попробуйте снова.");
                     continue;
                 }
 
+                // Проверка: порт должен быть числом (не буквы и не символы)
                 if (!IsNumericString(portInput))
                 {
-                    Console.WriteLine($"Ошибка: '{portInput}' - не число!");
+                    Console.WriteLine($"Ошибка: '{portInput}' - это не число! Введите цифры (например, 8888).");
                     continue;
                 }
 
                 tcpPort = int.Parse(portInput);
 
+                // Проверка: порт должен быть в допустимом диапазоне
                 if (!IsValidPort(tcpPort))
                 {
-                    Console.WriteLine($"Ошибка: Порт {tcpPort} недопустим!");
+                    Console.WriteLine($"Ошибка: Порт {tcpPort} недопустим! Используйте порты от 1 до 65535.");
                     continue;
                 }
 
                 break;
             }
 
-            // === ВВОД ЛОКАЛЬНОГО IP КЛИЕНТА ===
-            string localIp;
-            while (true)
+            // Проверка доступности порта
+            if (!IsTcpPortAvailable(serverIp, tcpPort))
             {
-                Console.Write("Введите ваш локальный IP адрес (например, 127.0.0.1): ");
-                localIp = Console.ReadLine();
-
-                if (string.IsNullOrWhiteSpace(localIp))
-                {
-                    Console.WriteLine("Ошибка: Локальный IP не может быть пустым!");
-                    continue;
-                }
-
-                if (!IsValidIPv4(localIp))
-                {
-                    Console.WriteLine($"Ошибка: '{localIp}' - не корректный IPv4 адрес!");
-                    continue;
-                }
-
-                break;
-            }
-
-            // === ВВОД ЛОКАЛЬНОГО ПОРТА КЛИЕНТА ===
-            int localPort;
-            while (true)
-            {
-                Console.Write("Введите ваш локальный TCP порт (1-65535, уникальный): ");
-                string portInput = Console.ReadLine();
-
-                if (string.IsNullOrWhiteSpace(portInput))
-                {
-                    Console.WriteLine("Ошибка: Порт не может быть пустым!");
-                    continue;
-                }
-
-                if (!IsNumericString(portInput))
-                {
-                    Console.WriteLine($"Ошибка: '{portInput}' - не число!");
-                    continue;
-                }
-
-                localPort = int.Parse(portInput);
-
-                if (!IsValidPort(localPort))
-                {
-                    Console.WriteLine($"Ошибка: Порт {localPort} недопустим!");
-                    continue;
-                }
-
-                break;
-            }
-
-            // === ПРОВЕРКА 1: IP клиента НЕ ДОЛЖЕН совпадать с IP сервера ===
-            if (localIp == serverIp)
-            {
-                Console.WriteLine($"\n!!! ВНИМАНИЕ: Ваш IP {localIp} совпадает с IP сервера !!!");
-                Console.WriteLine("Это допустимо ТОЛЬКО для теста на одном компьютере (localhost).");
-                Console.WriteLine("В реальной сети используйте разные IP адреса.");
-                Console.Write("Продолжить подключение? (y/n): ");
-                if (Console.ReadLine()?.ToLower() != "y")
-                {
-                    Console.WriteLine("Подключение отменено.");
-                    return;
-                }
-            }
-
-            // === ПРОВЕРКА 2: Порт клиента НЕ ДОЛЖЕН совпадать с портом сервера ===
-            if (localPort == tcpPort)
-            {
-                Console.WriteLine($"\n!!! ОШИБКА: Ваш локальный порт {localPort} совпадает с портом сервера {tcpPort} !!!");
-                Console.WriteLine("Два разных приложения (сервер и клиент) не могут использовать один порт на одном IP.");
-                Console.WriteLine("Используйте разные порты для сервера и клиента.");
+                Console.WriteLine($"Ошибка: Порт {tcpPort} на адресе {serverIp} уже используется!");
                 Console.WriteLine("Нажмите любую клавишу для выхода...");
                 Console.ReadKey();
                 return;
             }
-
-            // === ПРОВЕРКА 3: Если IP одинаковые, то порты точно должны быть разными ===
-            if (localIp == serverIp && localPort == tcpPort)
-            {
-                Console.WriteLine($"\n!!! ОШИБКА: На одном IP {localIp} порт {localPort} уже занят сервером !!!");
-                Console.WriteLine("Невозможно подключиться, так как порт конфликтует с сервером.");
-                Console.WriteLine("Нажмите любую клавишу для выхода...");
-                Console.ReadKey();
-                return;
-            }
-
-            // === ПРОВЕРКА 4: Доступность локального порта ===
-            if (!IsLocalPortAvailable(localIp, localPort))
-            {
-                Console.WriteLine($"\n!!! ОШИБКА: Локальный порт {localPort} на адресе {localIp} уже используется !!!");
-                Console.WriteLine("Возможно, другой клиент уже использует этот порт.");
-                Console.WriteLine("Попробуйте другой порт (например, {localPort + 1})");
-                Console.WriteLine("Нажмите любую клавишу для выхода...");
-                Console.ReadKey();
-                return;
-            }
-
-            Console.WriteLine("\nВсе проверки пройдены. Подключение...\n");
 
             try
             {
-                tcpClient = new TcpClient(new IPEndPoint(IPAddress.Parse(localIp), localPort));
-                await tcpClient.ConnectAsync(serverIp, tcpPort);
-                stream = tcpClient.GetStream();
+                // Запуск TCP сервера на указанном IP
+                tcpListener = new TcpListener(ipAddress, tcpPort);
+                tcpListener.Start();
+                Console.WriteLine($"TCP сервер успешно запущен на {serverIp}:{tcpPort}");
 
-                byte[] nameData = Encoding.UTF8.GetBytes(userName);
-                await stream.WriteAsync(nameData, 0, nameData.Length);
+                // Запуск обработки TCP подключений
+                _ = Task.Run(AcceptClients);
 
-                isConnected = true;
-                Console.WriteLine($"Подключено к серверу {serverIp}:{tcpPort} с вашего IP {localIp}:{localPort}");
+                Console.WriteLine("Сервер запущен. Нажмите Enter для остановки...");
+                Console.ReadLine();
 
-                receiveThread = new Thread(ReceiveMessages);
-                receiveThread.Start();
-
-                await SendMessages();
+                isRunning = false;
+                Stop();
             }
-            catch (SocketException ex)
+            catch (Exception ex)
             {
-                if (ex.SocketErrorCode == SocketError.AddressAlreadyInUse)
+                Console.WriteLine($"Ошибка при запуске сервера: {ex.Message}");
+            }
+        }
+
+        private bool IsTcpPortAvailable(string ip, int port)
+        {
+            try
+            {
+                TcpListener listener = new TcpListener(IPAddress.Parse(ip), port);
+                listener.Start();
+                listener.Stop();
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private async Task AcceptClients()
+        {
+            while (isRunning)
+            {
+                try
                 {
-                    Console.WriteLine($"Ошибка: Локальный порт {localPort} уже используется!");
+                    var tcpClient = await tcpListener.AcceptTcpClientAsync();
+
+                    string clientIP = ((IPEndPoint)tcpClient.Client.RemoteEndPoint).Address.ToString();
+                    int clientPort = ((IPEndPoint)tcpClient.Client.RemoteEndPoint).Port;
+
+                    // Проверка уникальности IP клиента
+                    bool ipExists = false;
+                    lock (clientIPs)
+                    {
+                        ipExists = clientIPs.ContainsKey(clientIP);
+                    }
+
+                    if (ipExists)
+                    {
+                        Console.WriteLine($"Отказано в подключении: клиент с IP {clientIP} уже подключен!");
+                        tcpClient.Close();
+                        continue;
+                    }
+
+                    lock (clients)
+                    {
+                        clients.Add(tcpClient);
+                    }
+
+                    lock (clientIPs)
+                    {
+                        clientIPs[clientIP] = clientPort;
+                    }
+
+                    _ = Task.Run(() => HandleClient(tcpClient, clientIP));
                 }
-                else if (ex.SocketErrorCode == SocketError.ConnectionRefused)
+                catch (Exception ex)
                 {
-                    Console.WriteLine($"Ошибка: Сервер {serverIp}:{tcpPort} не отвечает. Запущен ли сервер?");
+                    if (isRunning)
+                        Console.WriteLine($"Ошибка при подключении клиента: {ex.Message}");
                 }
-                else
+            }
+        }
+
+        private async Task HandleClient(TcpClient tcpClient, string clientIP)
+        {
+            string clientName = "Неизвестный";
+            string clientEndPoint = tcpClient.Client.RemoteEndPoint?.ToString() ?? "Unknown";
+
+            try
+            {
+                NetworkStream stream = tcpClient.GetStream();
+                byte[] buffer = new byte[4096];
+
+                int bytesRead = await stream.ReadAsync(buffer, 0, buffer.Length);
+                clientName = Encoding.UTF8.GetString(buffer, 0, bytesRead);
+
+                lock (clientNames)
                 {
-                    Console.WriteLine($"Ошибка: {ex.Message}");
+                    clientNames[tcpClient] = clientName;
+                }
+
+                Console.WriteLine($"Клиент {clientName} подключился с адреса {clientEndPoint}");
+                await BroadcastSystemMessage($"{clientName} присоединился к чату (IP: {clientIP})", "connect", clientName);
+
+                while (isRunning && tcpClient.Connected)
+                {
+                    bytesRead = await stream.ReadAsync(buffer, 0, buffer.Length);
+                    if (bytesRead == 0) break;
+
+                    string message = Encoding.UTF8.GetString(buffer, 0, bytesRead);
+                    Console.WriteLine($"{clientName}: {message}");
+                    await BroadcastMessage(message, clientName);
                 }
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Ошибка: {ex.Message}");
+                Console.WriteLine($"Ошибка при обработке клиента {clientName}: {ex.Message}");
             }
             finally
             {
-                Disconnect();
+                RemoveClient(tcpClient, clientIP);
+                await BroadcastSystemMessage($"{clientName} покинул чат", "disconnect", clientName);
             }
         }
 
-        private bool IsLocalPortAvailable(string ip, int port)
+        private async Task BroadcastMessage(string message, string senderName)
         {
-            try
-            {
-                TcpClient testClient = new TcpClient(new IPEndPoint(IPAddress.Parse(ip), port));
-                testClient.Close();
-                return true;
-            }
-            catch (SocketException ex) when (ex.SocketErrorCode == SocketError.AddressAlreadyInUse)
-            {
-                return false;
-            }
-            catch
-            {
-                return true;
-            }
-        }
+            string formattedMessage = $"{senderName}: {message}";
+            byte[] data = Encoding.UTF8.GetBytes($"MSG|{formattedMessage}");
 
-        private void ReceiveMessages()
-        {
-            byte[] buffer = new byte[4096];
+            List<TcpClient> clientsCopy;
+            lock (clients)
+            {
+                clientsCopy = new List<TcpClient>(clients);
+            }
 
-            while (isConnected && tcpClient.Connected)
+            foreach (var client in clientsCopy)
             {
                 try
                 {
-                    int bytesRead = stream.Read(buffer, 0, buffer.Length);
-                    if (bytesRead == 0) break;
-
-                    string message = Encoding.UTF8.GetString(buffer, 0, bytesRead);
-
-                    if (message.StartsWith("MSG|"))
+                    if (client.Connected)
                     {
-                        Console.WriteLine(message.Substring(4));
-                    }
-                    else if (message.StartsWith("SYS|"))
-                    {
-                        string[] parts = message.Split('|');
-                        if (parts.Length >= 4)
-                        {
-                            string type = parts[1];
-                            string sysMessage = parts[3];
-
-                            if (type == "connect")
-                                Console.ForegroundColor = ConsoleColor.Green;
-                            else if (type == "disconnect")
-                                Console.ForegroundColor = ConsoleColor.Red;
-
-                            Console.WriteLine(sysMessage);
-                            Console.ResetColor();
-                        }
+                        var stream = client.GetStream();
+                        await stream.WriteAsync(data, 0, data.Length);
                     }
                 }
                 catch (Exception ex)
                 {
-                    if (isConnected)
-                        Console.WriteLine($"Ошибка: {ex.Message}");
-                    break;
+                    Console.WriteLine($"Ошибка при отправке сообщения: {ex.Message}");
                 }
             }
         }
 
-        private async Task SendMessages()
+        private async Task BroadcastSystemMessage(string message, string type, string clientName)
         {
-            Console.WriteLine("Введите сообщения (или 'exit' для выхода):");
+            byte[] data = Encoding.UTF8.GetBytes($"SYS|{type}|{clientName}|{message}");
 
-            while (isConnected)
+            List<TcpClient> clientsCopy;
+            lock (clients)
             {
-                string message = Console.ReadLine();
+                clientsCopy = new List<TcpClient>(clients);
+            }
 
-                if (message?.ToLower() == "exit")
-                    break;
-
-                if (!string.IsNullOrWhiteSpace(message))
+            foreach (var client in clientsCopy)
+            {
+                try
                 {
-                    try
+                    if (client.Connected)
                     {
-                        byte[] data = Encoding.UTF8.GetBytes(message);
+                        var stream = client.GetStream();
                         await stream.WriteAsync(data, 0, data.Length);
                     }
-                    catch (Exception ex)
-                    {
-                        Console.WriteLine($"Ошибка отправки: {ex.Message}");
-                        break;
-                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Ошибка при отправке системного сообщения: {ex.Message}");
                 }
             }
         }
 
-        private void Disconnect()
+        private void RemoveClient(TcpClient client, string clientIP)
         {
-            isConnected = false;
-            receiveThread?.Join(1000);
-            stream?.Close();
-            tcpClient?.Close();
-            Console.WriteLine("Отключено от сервера");
+            lock (clients)
+            {
+                clients.Remove(client);
+            }
+            lock (clientNames)
+            {
+                if (clientNames.ContainsKey(client))
+                    clientNames.Remove(client);
+            }
+            lock (clientIPs)
+            {
+                if (clientIPs.ContainsKey(clientIP))
+                    clientIPs.Remove(clientIP);
+            }
+            client.Close();
+        }
+
+        private void Stop()
+        {
+            tcpListener?.Stop();
+
+            lock (clients)
+            {
+                foreach (var client in clients)
+                {
+                    client.Close();
+                }
+                clients.Clear();
+            }
+
+            Console.WriteLine("Сервер остановлен");
         }
     }
 }
